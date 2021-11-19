@@ -1,0 +1,110 @@
+# 1. This part of the code is used to install sclmpute package and perform the single-cell metabolic sparse matrix imputation.
+# Installation
+install.packages("devtools")
+library(devtools)
+install_github("Vivianstats/scImpute")
+
+# In the simplest case, the imputation task can be done with one single function scimpute:
+scimpute(# full path to raw count matrix
+         count_path = system.file("extdata", "raw_count.csv", package = "scImpute"), 
+         infile = "csv",           # format of input file
+         outfile = "csv",          # format of output file
+         out_dir = "./",           # full path to output directory
+         labeled = FALSE,          # cell type labels not available
+         drop_thre = 0.5,          # threshold set on dropout probability
+         Kcluster = 2,             # 2 cell subpopulations
+         ncores = 10)              # number of cores used in parallel computation
+         
+# 2. This part of the code is used to install MetNormalizer package and perform the single-cell metabolic sparse matrix imputation.
+devtools::install_github("jaspershen/MetNormalizer")
+
+# To do QC-based metabolomics batch effects correction:
+library(MetNormalizer)
+path <- file.path("")
+new.path <- path
+
+metNor(
+  ms1.data.name = "data.csv",
+  sample.info.name = "sample.info.csv",
+  minfrac.qc = 0,
+  minfrac.sample = 0,
+  optimization = TRUE,
+  multiple = 5,
+  threads = 4,
+  path = new.path
+)
+
+
+# 3. This part of the code is mainly based on the visualization of metabolic heterogeneity based on the UMAP algorithm.
+# Install packages
+install.packages('Seurat')
+install.packages('ggsci')
+install.packages('ggplot2')
+
+# Initialization
+library(Seurat)
+matrix <- read.csv("raw.csv")
+meta <- read.csv("meta.csv")
+rownames(matrix) <- matrix$X
+matrix <- matrix[,-1]
+matrix[1:4,1:4]
+
+# Create the Seurat object with all the data (unfiltered)
+main_tiss <- CreateSeuratObject(counts = matrix)
+# add rownames to metadta 
+row.names(meta) <- meta$sample
+
+# add metadata to Seurat object 
+main_tiss <- AddMetaData(object = main_tiss, metadata = meta)
+main_tiss <- ScaleData(main_tiss, verbose = FALSE)
+main_tiss <- FindVariableFeatures(main_tiss, selection.method = "vst", nfeatures = 60)
+
+# Identify the 10 most highly variable genes
+top10 <- head(VariableFeatures(main_tiss), 10)
+# plot variable features with and without labels
+plot1 <- VariableFeaturePlot(main_tiss)
+plot2 <- LabelPoints(plot = plot1, points = top10, repel = TRUE)
+plot1+plot2
+main_tiss <- RunPCA(main_tiss, features = VariableFeatures(object = main_tiss))
+
+#Examine and visualize PCA results a few different ways
+print(main_tiss[["pca"]], dims = 1:5, nfeatures = 5)
+VizDimLoadings(main_tiss, dims = 1:2, reduction = "pca")
+DimPlot(main_tiss, reduction = "pca")
+main_tiss <- JackStraw(main_tiss, num.replicate = 10)
+main_tiss <- ScoreJackStraw(main_tiss, dims = 1:20)
+JackStrawPlot(main_tiss, dims = 1:15)
+ElbowPlot(main_tiss)
+library(ggsci)
+library(ggplot2)
+main_tiss <- RunPCA(main_tiss, npcs = 10, verbose = FALSE)
+main_tiss <- RunUMAP(main_tiss, reduction = "pca", dims = 1:10)
+main_tiss <- FindNeighbors(main_tiss, reduction = "pca", dims = 1:10)
+main_tiss <- FindClusters(main_tiss, resolution = 0.7)
+DimPlot(main_tiss,group.by = "ident",cols = pal_d3("category10")(9))
+ggplot(main_tiss@meta.data,aes(x=celltype)) + geom_bar(aes(fill=factor(seurat_clusters)),position="fill")+theme_bw()+scale_fill_manual(values=pal_d3("category10")(11))+coord_flip()
+
+#Visualization of cell subpopulations
+markers_df <- FindMarkers(object = main_tiss, ident.1 = 8, min.pct = 0.25)
+print(x = head(markers_df))
+markers_genes =  rownames(head(x = markers_df, n = 5))
+VlnPlot(object = main_tiss, features =markers_genes,log =T )
+FeaturePlot(object = main_tiss, features=markers_genes )
+FeaturePlot(object = main_tiss, features=c("Features")
+
+# 4. This part of the code is mainly based on the Stream algorithm to do microbial pseudo-time analysis.
+Docker can be downloaded freely from here: 
+https://store.docker.com/search?offering=community&type=edition
+
+# To get an image of STREAM, simply execute the following command:
+docker pull pinellolab/stream
+
+# To run the website on a local machine after the Docker installation, from the command line execute the following command:
+docker run -p 10001:10001 pinellolab/stream_web
+
+# After the execution of the command the user will have a local instance of the website accessible at the URL: 
+http://localhost:10001
+
+# To stop the website, from the command line execute the following command:
+docker ps
+docker kill CONTAINER_ID
