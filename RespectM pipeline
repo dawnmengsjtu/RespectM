@@ -59,8 +59,8 @@ main_tiss <- AddMetaData(object = main_tiss, metadata = meta)
 main_tiss <- ScaleData(main_tiss, verbose = FALSE)
 main_tiss <- FindVariableFeatures(main_tiss, selection.method = "vst", nfeatures = 60)
 
-# Identify the 10 most highly variable genes
-top10 <- head(VariableFeatures(main_tiss), 10)
+# Identify the 60 most highly variable features
+top60 <- head(VariableFeatures(main_tiss), 60)
 # plot variable features with and without labels
 plot1 <- VariableFeaturePlot(main_tiss)
 plot2 <- LabelPoints(plot = plot1, points = top10, repel = TRUE)
