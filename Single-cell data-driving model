@@ -1,0 +1,365 @@
+import pandas as pd
+import numpy as np
+import tensorflow as tf
+from sklearn.model_selection import train_test_split
+from sklearn.feature_selection import RFECV
+from sklearn.svm import SVR
+from sklearn.preprocessing import MinMaxScaler
+from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+from keras.callbacks import ModelCheckpoint
+from keras.layers import Input, Dense, concatenate
+from keras.models import Model
+from keras.regularizers import l1_l2
+import matplotlib.pyplot as plt
+from tensorflow.keras.callbacks import Callback
+
+# Load metabolomics and transcriptome data files
+metabolomics = pd.read_excel("metabolomics.xlsx")
+transcriptome = pd.read_excel("transcriptomics.xlsx")
+
+# Set random seeds for reproducibility
+np.random.seed(42)
+tf.random.set_seed(42)
+
+# Set x and y variables for metabolomics data
+y_m = metabolomics['lipid'].values
+x_m = metabolomics.drop('lipid', axis=1).values
+
+# Set x and y variables for transcriptome data
+y_t = transcriptome['lipid'].values
+x_t = transcriptome.drop('lipid', axis=1).values
+
+# Get gene list from transcriptome data
+gene_list = transcriptome.drop('lipid', axis=1).columns.tolist()
+
+# Normalize x and y
+scaler_x_m = MinMaxScaler()
+scaler_y_m = MinMaxScaler()
+scaler_x_t = MinMaxScaler()
+scaler_y_t = MinMaxScaler()
+
+x_m = scaler_x_m.fit_transform(x_m)
+y_m = scaler_y_m.fit_transform(y_m.reshape(-1, 1))
+
+x_t = scaler_x_t.fit_transform(x_t)
+y_t = scaler_y_t.fit_transform(y_t.reshape(-1, 1))
+
+# Use Recursive Feature Elimination with Cross-Validation for more stable feature selection
+estimator = SVR(kernel="linear")
+
+selector_t = RFECV(estimator, step=1, cv=5)
+selector_t = selector_t.fit(x_t, y_t.flatten())
+x_t_selected = selector_t.transform(x_t)
+
+selector_m = RFECV(estimator, step=1, cv=5)
+selector_m = selector_m.fit(x_m, y_m.flatten())
+x_m_selected = selector_m.transform(x_m)
+
+# Initialize a dictionary to store the results
+results = {
+    'repetitions': [],
+    'avg_mse_m': [],
+    'avg_mae_m': [],
+    'avg_r2_m': [],
+    'avg_mse_t': [],
+    'avg_mae_t': [],
+    'avg_r2_t': []
+}
+
+repetitions = [10,20,30,40]
+
+for repeat in repetitions:
+    gene_frequencies = {}
+    genes_intersection = set()
+    gene_importances_cumulative = {}
+    important_genes_sets = []
+    trans_metab_gene_importances_cumulative = {}
+    all_top_50_genes = []
+    trans_metab_important_genes_sets = []
+    trans_metab_genes_intersection = set()  # Initialize a set to store the intersection of important genes across all repetitions
+
+    # Initialize lists to store results for the current number of repetitions
+    mse_m_values = []
+    mae_m_values = []
+    r2_m_values = []
+    mse_t_values = []
+    mae_t_values = []
+    r2_t_values = []
+   
+    # Split data into training and testing sets
+    x_m_train, x_m_test, y_m_train, y_m_test = train_test_split(x_m_selected, y_m, test_size=0.2, random_state=None)
+    x_t_train, x_t_test, y_t_train, y_t_test = train_test_split(x_t_selected, y_t, test_size=0.2, random_state=None)
+
+    # Execute model training and evaluation 'repeat' times
+    # Execute model training and evaluation 'repeat' times
+    for i in range(repeat):
+        # Define the model structure
+        input_m = Input(shape=(x_m_selected.shape[1],))
+        encoded_m = Dense(64, activation='relu', kernel_regularizer=l1_l2(l1=0.001, l2=0.001))(input_m)
+        encoded_m = Dense(200, activation='relu', kernel_regularizer=l1_l2(l1=0.001, l2=0.001))(encoded_m)
+
+        input_t = Input(shape=(x_t_selected.shape[1],))
+        encoded_t = Dense(64, activation='relu', kernel_regularizer=l1_l2(l1=0.001, l2=0.001))(input_t)
+        encoded_t = Dense(200, activation='relu', kernel_regularizer=l1_l2(l1=0.001, l2=0.001))(encoded_t)
+
+        merged = concatenate([encoded_m, encoded_t])
+        mvnn_layer1 = Dense(32, activation='relu')(merged)
+        mvnn_layer2 = Dense(32, activation='relu')(mvnn_layer1)
+
+        # Define two decoders, each corresponding to one target
+        decoded_m_output = Dense(1, name="output_m")(mvnn_layer2)
+        decoded_t_output = Dense(1, name="output_t")(mvnn_layer2)
+
+        # Define model mapping inputs to two outputs
+        model = Model(inputs=[input_m, input_t], outputs=[decoded_m_output, decoded_t_output])
+
+        # Compile the model with multiple loss functions
+        model.compile(optimizer='adam', loss={'output_m': 'mean_squared_error', 'output_t': 'mean_squared_error'})
+
+        # Train the model using two target variables
+        checkpoint = ModelCheckpoint('best_model.h5', monitor='val_loss', verbose=1, save_best_only=True, mode='min')
+        history = model.fit([x_m_train, x_t_train], {'output_m': y_m_train, 'output_t': y_t_train},
+                            epochs=100, batch_size=32,
+                            validation_data=([x_m_test, x_t_test], {'output_m': y_m_test, 'output_t': y_t_test}),
+                            callbacks=[checkpoint])
+
+        # Calculate baseline metric
+        y_pred_t_baseline = model.predict([x_m_test, x_t_test])[1]  # [1] for transcriptomics output
+        baseline_metric = mean_squared_error(y_t_test, y_pred_t_baseline)
+
+        # Evaluate the trained model on the test data
+        y_pred_m, y_pred_t = model.predict([x_m_test, x_t_test])
+        test_loss = model.evaluate([x_m_test, x_t_test], {'output_m': y_m_test, 'output_t': y_t_test})
+
+        # Compute additional metrics for metabolomics output
+        test_mae_m = mean_absolute_error(y_m_test, y_pred_m)
+        test_mse_m = mean_squared_error(y_m_test, y_pred_m)
+        test_r2_m = r2_score(y_m_test, y_pred_m)
+
+        # Compute additional metrics for transcriptomics output
+        test_mae_t = mean_absolute_error(y_t_test, y_pred_t)
+        test_mse_t = mean_squared_error(y_t_test, y_pred_t)
+        test_r2_t = r2_score(y_t_test, y_pred_t)
+
+        # Printing the metrics
+        print('Metabolomics Output:')
+        print('Test MAE:', test_mae_m)
+        print('Test MSE:', test_mse_m)
+        print('Test R2 score:', test_r2_m)
+
+        print('Transcriptomics Output:')
+        print('Test MAE:', test_mae_t)
+        print('Test MSE:', test_mse_t)
+        print('Test R2 score:', test_r2_t)
+
+        # Append evaluation metrics to the lists
+        mse_m_values.append(test_mse_m)
+        mae_m_values.append(test_mae_m)
+        r2_m_values.append(test_r2_m)
+        mse_t_values.append(test_mse_t)
+        mae_t_values.append(test_mae_t)
+        r2_t_values.append(test_r2_t)
+
+        # End of the code you provided
+        # Function for calculating permutation feature importance
+        def permutation_feature_importance(model, x_t_test, y_t_test, baseline_metric):
+            n_features = x_t_test.shape[1]
+            importances = np.zeros(n_features)
+
+            for i in range(n_features):
+                x_t_permuted = x_t_test.copy()
+                x_t_permuted[:, i] = np.random.permutation(x_t_test[:, i])
+                y_pred_permuted = model.predict([x_m_test, x_t_permuted])[1]  # [1] for transcriptomics output
+                permuted_metric = mean_squared_error(y_t_test, y_pred_permuted)
+                importances[i] = permuted_metric - baseline_metric
+
+            return importances
+
+        # Calculate feature importances
+        importances = permutation_feature_importance(model, x_t_test, y_t_test, baseline_metric)
+
+        # Get top 50 features
+        top_50_indices = np.argsort(importances)[::-1][:50]
+
+        # Get a boolean mask of the features retained after selection
+        selected_features_mask = selector_t.support_
+
+        # Get the gene names of the selected features
+        selected_gene_names = np.array(gene_list)[selected_features_mask]
+
+        # Get the top 50 gene names based on permutation importance
+        top_50_genes = [selected_gene_names[i] for i in top_50_indices]
+
+        # Print the gene names of the top 50 important features
+        print("Top 50 important genes (Transcriptomics):", top_50_genes)
+
+        # Append the top_50_genes for this iteration to all_top_50_genes
+        all_top_50_genes.append(top_50_genes)
+
+        # Convert important genes to a set
+        important_genes_set = set(top_50_genes)
+
+        # Update the intersection set
+        if i == 0:
+            genes_intersection = important_genes_set
+        else:
+            genes_intersection = genes_intersection.intersection(important_genes_set)
+
+        # Renew dict gene_importances_cumulative
+        for gene, importance in zip(top_50_genes, importances[top_50_indices]):
+            if gene in gene_importances_cumulative:
+                gene_importances_cumulative[gene].append(importance)
+            else:
+                gene_importances_cumulative[gene] = [importance]
+        
+    
+        # Define a function to calculate the replacement feature importance of recommended genes based on transcription-metabolism
+        def trans_metab_permutation_feature_importance(model, x_m_test, x_t_test, y_t_test, baseline_metric_t):
+            n_features_t = x_t_test.shape[1]
+            n_features_m = x_m_test.shape[1]
+            
+            # Initialize array to hold importance
+            importances_t = np.zeros(n_features_t)
+            
+            # The importance calculation of transcriptomics
+            for i in range(n_features_t):
+                x_t_permuted = x_t_test.copy()
+                x_t_permuted[:, i] = np.random.permutation(x_t_test[:, i])
+                y_pred_permuted_t = model.predict([x_m_test, x_t_permuted])[1]
+                permuted_metric_t = mean_squared_error(y_t_test, y_pred_permuted_t)
+                importances_t[i] = permuted_metric_t - baseline_metric_t
+            
+            # Calculate the effect of metabolomics to transcriptomics output
+            metabolomics_effect = 0
+            for i in range(n_features_m):
+                x_m_permuted = x_m_test.copy()
+                x_m_permuted[:, i] = np.random.permutation(x_m_test[:, i])
+                y_pred_permuted_t = model.predict([x_m_permuted, x_t_test])[1]
+                permuted_metric_t = mean_squared_error(y_t_test, y_pred_permuted_t)
+                metabolomics_effect += permuted_metric_t - baseline_metric_t
+            
+            # Normalize the effect of metabolomics
+            metabolomics_effect /= n_features_m
+            
+            # Obtain the index by importances_t
+            top_indices = np.argsort(importances_t)[::-1][:50]  # 取前50个
+            selected_gene_names = np.array(gene_list)[selector_t.support_]
+            top_genes = [selected_gene_names[i] for i in top_indices]
+
+            # print top genes
+            print("Top 50 important genes (Multi-omics):", top_genes)
+            print("Overall effect of metabolomics data interference:", metabolomics_effect)
+            
+            return top_genes, importances_t[top_indices]
+
+        # Calculate the feature importance
+        baseline_metric_t = mean_squared_error(y_t_test, model.predict([x_m_test, x_t_test])[1])  # [1] 用于转录组学输出
+        top_genes, top_importances = trans_metab_permutation_feature_importance(model, x_m_test, x_t_test, y_t_test, baseline_metric_t)
+
+        # Convert top_genes to a set and add it to trans_metab_important_genes_sets
+        trans_metab_important_genes_set = set(top_genes)
+        trans_metab_important_genes_sets.append(trans_metab_important_genes_set)
+
+        # Update trans_metab_gene_importances_cumulative with the importances of the genes in top_genes
+        for gene, importance in zip(top_genes, top_importances):
+            if gene in trans_metab_gene_importances_cumulative:
+                trans_metab_gene_importances_cumulative[gene].append(importance)
+            else:
+                trans_metab_gene_importances_cumulative[gene] = [importance]
+
+        # Update trans_metab_genes_intersection with the intersection of itself and trans_metab_important_genes_set
+        if i == 0:
+            trans_metab_genes_intersection = trans_metab_important_genes_set
+        else:
+            trans_metab_genes_intersection = trans_metab_genes_intersection.intersection(trans_metab_important_genes_set)
+
+    # At this point, the inner loop has finished executing 'repeat' times.
+    # Calculate average importances for intersecting genes
+    average_importances = {}
+    for gene in genes_intersection:
+        average_importances[gene] = np.mean(gene_importances_cumulative[gene])
+
+    # Sort by average importance
+    sorted_average_importances = sorted(average_importances.items(), key=lambda x: x[1], reverse=True)
+
+    # Extract sorted gene names
+    sorted_gene_names = [gene[0] for gene in sorted_average_importances]
+
+    # Print intersecting genes sorted by average importance
+    print(f"Intersecting genes in group with {repeat} repetitions, sorted by average importance:")
+    for gene, importance in sorted_average_importances:
+        print(f"{gene}: {importance}")
+
+    # Plot heatmap
+    if len(genes_intersection) > 0:
+        # Create correlation matrix with sorted genes
+        correlation_matrix = np.zeros((len(genes_intersection), len(genes_intersection)))
+        for i, gene_a in enumerate(sorted_gene_names):
+            for j, gene_b in enumerate(sorted_gene_names):
+                correlation_matrix[i, j] = len(set(gene_a) & set(gene_b)) / min(len(gene_a), len(gene_b))
+
+        # Plot the heatmap
+        plt.figure(figsize=(10, 8))
+        sns.heatmap(correlation_matrix, annot=False, cmap='Blues')
+        plt.xticks(np.arange(0.5, len(sorted_gene_names)), sorted_gene_names, rotation=90)
+        plt.yticks(np.arange(0.5, len(sorted_gene_names)), sorted_gene_names, rotation=0)
+        plt.title(f'Repeat {repeat} times')
+        plt.show()
+    else:
+        print("Intersection of important genes is empty.")
+
+    # Use seaborn to draw a bar chart
+    plt.figure(figsize=(8, 10))
+    sns.barplot(x=[gene[1] for gene in sorted_average_importances], y=sorted_gene_names, palette='viridis')
+    plt.xlabel('Average Permutation Importance')
+    plt.ylabel('Gene Names')
+    plt.title('Bar plot of Average Permutation Importance for Genes')
+    plt.show()
+
+    # For genes recommended using transcription-metabolism:：
+    # Calculate the intersection after the loop ends
+    trans_metab_gene_intersection = trans_metab_genes_intersection  # Use the intersection set updated during the loop
+
+    trans_metab_average_importances = {gene: (np.mean(importance) + 1e-10) / len(trans_metab_important_genes_sets) for gene, importance in trans_metab_gene_importances_cumulative.items()}
+
+    # Rank genes and their average feature importance
+    sorted_trans_metab_gene_importances = sorted(trans_metab_average_importances.items(), key=lambda x: x[1], reverse=True)
+
+    # Extract sorted gene names and importance
+    sorted_trans_metab_gene_names = [gene[0] for gene in sorted_trans_metab_gene_importances]
+    sorted_trans_metab_importances = [gene[1] for gene in sorted_trans_metab_gene_importances]
+
+    # Print intersecting genes sorted by average importance
+    print(f"Intersecting genes in group with {repeat} repetitions (Multi-omics), sorted by average importance:")
+    for gene, importance in sorted_trans_metab_gene_importances:
+        print(f"{gene}: {importance}")
+
+    # Correct the sorted genes and retain only intersection genes
+    sorted_trans_metab_gene_names = [gene for gene in sorted_trans_metab_gene_names if gene in trans_metab_gene_intersection]
+    sorted_trans_metab_importances = [importance for gene, importance in zip(sorted_trans_metab_gene_names, sorted_trans_metab_importances) if gene in trans_metab_gene_intersection]
+
+    # Draw a transcription-metabolism heat map
+    if len(trans_metab_gene_intersection) > 0:
+        correlation_matrix = np.zeros((len(sorted_trans_metab_gene_names), len(sorted_trans_metab_gene_names)))
+
+        for i, gene_a in enumerate(sorted_trans_metab_gene_names):
+            for j, gene_b in enumerate(sorted_trans_metab_gene_names):
+                correlation_matrix[i, j] = len(set(gene_a) & set(gene_b)) / min(len(gene_a), len(gene_b))
+
+        # Draw heatmap
+        plt.figure(figsize=(10, 8))
+        sns.heatmap(correlation_matrix, annot=False, cmap='Blues')
+        plt.xticks(np.arange(0.5, len(sorted_trans_metab_gene_names)), sorted_trans_metab_gene_names, rotation=90)
+        plt.yticks(np.arange(0.5, len(sorted_trans_metab_gene_names)), sorted_trans_metab_gene_names, rotation=0)
+        plt.title(f'Repeat {repeat} times (Multi-omics)')
+        plt.show()
+    else:
+        print("Intersection of important genes is empty.")
+
+    # Plot bar plot by seaborn
+    plt.figure(figsize=(8, 10))
+    sns.barplot(x=sorted_trans_metab_importances, y=sorted_trans_metab_gene_names, palette='viridis')
+    plt.xlabel('Average Permutation Importance')
+    plt.ylabel('Gene Names')
+    plt.title('Bar plot of Average Permutation Importance for Genes (Multi-omics)')
+    plt.show()
