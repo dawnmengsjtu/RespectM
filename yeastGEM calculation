@@ -1,0 +1,52 @@
+import os
+from os.path import join
+import cobra
+from cobra.flux_analysis import single_gene_deletion
+import pandas as pd
+import math
+
+# Path to your data
+data_dir = r'xxx'
+
+# Load the gene list
+g = pd.read_excel(join(data_dir, "gene_list.xlsx"))
+genes_list = g['ID']
+
+# Load the Lipid_metabolism reaction list
+r = pd.read_excel(join(data_dir, "Lipid_metabolism_in_Yeast8.xlsx"))
+reaction_list = r['ID']
+
+# Load the name mapping
+name_mapping = pd.read_excel(join(data_dir, "corres.xlsx"))
+short_to_name = dict(zip(name_mapping['SHORT NAME'], name_mapping['NAME']))
+
+# Define a function to run code 2
+def run_code2(genes_list, reaction_list, model, data_dir):
+    reactions = [model.reactions.get_by_id(id) for id in reaction_list]
+    genes_list_in=[]
+    for short_name in genes_list:
+        if short_name in short_to_name:
+            genes_list_in.append(short_to_name[short_name])
+
+    effective_count=0
+    for g in genes_list_in:
+        model = cobra.io.read_sbml_model(join(data_dir,"yeast-GEM_8.6.3.xml"))
+        with model:
+            gene = model.genes.get_by_id(g)
+            gene.knock_out()
+            reactions = [model.reactions.get_by_id(id) for id in reaction_list]
+            model.optimize()
+                
+            flux_sum=0
+            for reaction in reactions:
+                flux_sum+=abs(reaction.flux)
+            
+            variation_value=math.log2(abs(flux_sum - 0.21126506)*10000)
+
+            if variation_value>4:
+                effective_count+=1
+
+    effective_ratio=effective_count/len(genes_list)*100
+    print(f'effective_ratio:'+str(effective_ratio)+'%')
+
+run_code2(genes_list, reaction_list, model, data_dir)
